@@ -1,0 +1,11 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Allows running the executable straight from a working copy (checkout); when
+# the gem is installed, lib is already in the load path and this is a no-op.
+lib = File.expand_path("../lib", __dir__)
+$LOAD_PATH.unshift(lib) unless $LOAD_PATH.include?(lib)
+
+require "phonemizer_ffi"
+
+Phonemizer.main(ARGV)

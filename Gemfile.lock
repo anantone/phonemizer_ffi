@@ -1,0 +1,47 @@
+PATH
+  remote: .
+  specs:
+    phonemizer_ffi (0.1.0)
+      ffi (~> 1.15)
+
+GEM
+  remote: https://rubygems.org/
+  specs:
+    diff-lcs (1.6.2)
+    ffi (1.17.4-x86_64-linux-gnu)
+    rake (13.4.2)
+    rspec (3.13.2)
+      rspec-core (~> 3.13.0)
+      rspec-expectations (~> 3.13.0)
+      rspec-mocks (~> 3.13.0)
+    rspec-core (3.13.7)
+      rspec-support (~> 3.13.0)
+    rspec-expectations (3.13.6)
+      diff-lcs (>= 1.2.0, < 2.0)
+      rspec-support (~> 3.13.0)
+    rspec-mocks (3.13.9)
+      diff-lcs (>= 1.2.0, < 2.0)
+      rspec-support (~> 3.13.0)
+    rspec-support (3.13.8)
+
+PLATFORMS
+  x86_64-linux-gnu
+
+DEPENDENCIES
+  phonemizer_ffi!
+  rake
+  rspec (~> 3.13)
+
+CHECKSUMS
+  diff-lcs (1.6.2)
+  ffi (1.17.4-x86_64-linux-gnu)
+  phonemizer_ffi (0.1.0)
+  rake (13.4.2)
+  rspec (3.13.2)
+  rspec-core (3.13.7)
+  rspec-expectations (3.13.6)
+  rspec-mocks (3.13.9)
+  rspec-support (3.13.8)
+
+BUNDLED WITH
+  4.1.0
