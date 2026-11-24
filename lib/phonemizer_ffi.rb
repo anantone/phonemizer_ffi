@@ -102,6 +102,11 @@ module Phonemizer
     # the phonemize pipeline (stitch substitutes the sentinel afterwards).
     module_function
 
+    # espeak-ng phoneme output mode flags: always IPA; in separator mode the
+    # sentinel character is OR-ed into bits 8+ (the phonemize pipeline
+    # substitutes the user's separator for the sentinel afterwards).
+    # @param phone_sep [String] user phoneme separator ("" for none)
+    # @return [Integer] espeak-ng phonememode flags
     def phonememode(phone_sep)
       mode = PHONEME_IPA
       mode |= (SEP_CHAR.ord << 8) unless phone_sep.empty?
@@ -147,6 +152,8 @@ module Phonemizer
     end
   end
 
+  # Clears the process-wide word -> phonemization cache. Useful between
+  # unrelated batches (to free memory) or after an espeak-ng upgrade.
   def clear_cache
     CACHE.clear
   end
@@ -197,6 +204,17 @@ module Phonemizer
 
   # ---------------------------------------------------------------- pipeline
 
+  # Phonemizes a whole batch of words in-process (no fork+exec per word) —
+  # the FFI backend's fast path for large lexicons. Same contract as the
+  # phonemizer gem's Phonemizer.phonemize_batch: drop-in replacement.
+  #
+  # @param words [Array<String>] the words (or short utterances) to phonemize
+  # @param language [String] espeak-ng voice, e.g. "fr" (default "en-us")
+  # @param phone_sep [String] inserted between phonemes, default ""
+  # @param word_sep [String] joins multiword utterances, default " "
+  # @param strip_stress [Boolean] remove espeak-ng stress marks (ˈ ˌ)
+  # @param language_switch [Symbol] :remove (default) or :keep language tags
+  # @return [Array<String>] one phonemization per input word, in order
   def phonemize_batch(words, language:, phone_sep:, word_sep:,
                      strip_stress:, language_switch:)
     # Guard for nil: only copy when some element isn't already a String
