@@ -3,6 +3,7 @@ phonemizer_ffi
 
 [![Gem Version](https://img.shields.io/gem/v/phonemizer_ffi.svg)](https://rubygems.org/gems/phonemizer_ffi)
 [![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Documentation](https://img.shields.io/badge/docs-rubydoc.info-blue.svg)](https://rubydoc.info/gems/phonemizer_ffi)
 
 An in-process [espeak-ng](https://github.com/espeak-ng/espeak-ng) phonemizer for Ruby: a **drop-in replacement for the [`phonemizer`](https://rubygems.org/gems/phonemizer) gem** that calls the `libespeak-ng` C library directly via [FFI](https://rubygems.org/gems/ffi) instead of spawning the `espeak-ng` CLI process once per word. Same API, same output — typically **one to two orders of magnitude faster** on large batches. Supports [these languages](https://github.com/espeak-ng/espeak-ng/blob/master/docs/languages.md).
 
