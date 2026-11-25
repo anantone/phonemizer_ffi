@@ -79,36 +79,44 @@ RSpec.describe Phonemizer do
   end
 
   describe '.stitch' do
-    # ipa_map: chunk piece -> raw IPA. We feed it directly, so no espeak.
+    # ipa_map: chunk piece -> raw IPA. We seed IPA_CACHE with it (key [piece, language, phone_sep]),
+    # then call stitch with the new signature — no espeak involved.
     let(:map) { { 'bonjour' => 'bɔ̃ʒuʁ', 'comment' => 'kɔmɑ̃' } }
+
+    def stitch_map(m, parts, phone_sep:, **opts)
+      m.each { |piece, ipa| Phonemizer::IPA_CACHE[[piece, 'test', phone_sep]] = ipa }
+      described_class.stitch(parts, language: 'test', phone_sep: phone_sep, **opts)
+    end
+
+    before { Phonemizer::IPA_CACHE.clear }
 
     it 'reassembles words and punctuation in order' do
       parts = ['bonjour', ',', 'comment']
-      expect(described_class.stitch(parts, map, phone_sep: '', word_sep: ' ',
-                                                strip_stress: true, language_switch: :remove))
+      expect(stitch_map(map, parts, phone_sep: '', word_sep: ' ',
+                                    strip_stress: true, language_switch: :remove))
         .to eq('bɔ̃ʒuʁ,kɔmɑ̃')
     end
 
     it 'passes punctuation through verbatim' do
       parts = ['bonjour', '...']
-      result = described_class.stitch(parts, map, phone_sep: '', word_sep: ' ',
-                                                  strip_stress: true, language_switch: :remove)
+      result = stitch_map(map, parts, phone_sep: '', word_sep: ' ',
+                                      strip_stress: true, language_switch: :remove)
       expect(result).to end_with('...')
     end
 
     it 'strips language-switch tags when :remove' do
       parts = ['wifi']
       m = { 'wifi' => 'vi (fr) fi' }
-      result = described_class.stitch(parts, m, phone_sep: '', word_sep: ' ',
-                                                strip_stress: true, language_switch: :remove)
+      result = stitch_map(m, parts, phone_sep: '', word_sep: ' ',
+                                    strip_stress: true, language_switch: :remove)
       expect(result).to eq('vi  fi')
     end
 
     it 'keeps language-switch tags when :keep' do
       parts = ['wifi']
       m = { 'wifi' => 'vi (fr) fi' }
-      result = described_class.stitch(parts, m, phone_sep: '', word_sep: ' ',
-                                                strip_stress: true, language_switch: :keep)
+      result = stitch_map(m, parts, phone_sep: '', word_sep: ' ',
+                                    strip_stress: true, language_switch: :keep)
       expect(result).to eq('vi (fr) fi')
     end
 
@@ -117,40 +125,40 @@ RSpec.describe Phonemizer do
       # (final s of "les" pronounced [z] before the vowel of "amis").
       parts = ['les amis']
       m = { 'les amis' => 'le-z amˈi' }
-      result = described_class.stitch(parts, m, phone_sep: '', word_sep: ' ',
-                                                strip_stress: true, language_switch: :remove)
+      result = stitch_map(m, parts, phone_sep: '', word_sep: ' ',
+                                    strip_stress: true, language_switch: :remove)
       expect(result).to eq('lez ami')
     end
 
     it 'leaves stress marks and the liaison hyphen in place when not stripping' do
       parts = ['les amis']
       m = { 'les amis' => 'le-z amˈi' }
-      result = described_class.stitch(parts, m, phone_sep: '', word_sep: ' ',
-                                                strip_stress: false, language_switch: :remove)
+      result = stitch_map(m, parts, phone_sep: '', word_sep: ' ',
+                                    strip_stress: false, language_switch: :remove)
       expect(result).to eq('le-z amˈi')
     end
 
     it 'treats a plain space as a word boundary when phone_sep is empty' do
       parts = ['les amis']
       m = { 'les amis' => 'le ami' }
-      result = described_class.stitch(parts, m, phone_sep: '', word_sep: ' _ ',
-                                                strip_stress: true, language_switch: :remove)
+      result = stitch_map(m, parts, phone_sep: '', word_sep: ' _ ',
+                                    strip_stress: true, language_switch: :remove)
       expect(result).to eq('le _ ami')
     end
 
     it 'maps the \x01 sentinel to phone_sep and a plain space to word_sep in sep mode' do
       parts = ['les amis']
       m = { 'les amis' => "l\x01e a\x01m\x01i" }
-      result = described_class.stitch(parts, m, phone_sep: '-', word_sep: ' ',
-                                                strip_stress: true, language_switch: :remove)
+      result = stitch_map(m, parts, phone_sep: '-', word_sep: ' ',
+                                    strip_stress: true, language_switch: :remove)
       expect(result).to eq('l-e a-m-i')
     end
 
     it 'supports multi-character separators containing spaces without collision' do
       parts = ['les amis']
       m = { 'les amis' => "l\x01e a\x01m\x01i" }
-      result = described_class.stitch(parts, m, phone_sep: ' | ', word_sep: ' _ ',
-                                                strip_stress: true, language_switch: :remove)
+      result = stitch_map(m, parts, phone_sep: ' | ', word_sep: ' _ ',
+                                    strip_stress: true, language_switch: :remove)
       expect(result).to eq('l | e _ a | m | i')
     end
 
@@ -159,15 +167,15 @@ RSpec.describe Phonemizer do
       # marker, so it must survive stress stripping.
       parts = ['les amis']
       m = { 'les amis' => "le\x01z a\x01m\x01i" }
-      result = described_class.stitch(parts, m, phone_sep: '-', word_sep: ' ',
-                                                strip_stress: true, language_switch: :remove)
+      result = stitch_map(m, parts, phone_sep: '-', word_sep: ' ',
+                                    strip_stress: true, language_switch: :remove)
       expect(result).to eq('le-z a-m-i')
     end
 
     it 'substitutes empty string for a missing IPA mapping' do
       parts = ['unknown']
-      result = described_class.stitch(parts, {}, phone_sep: '', word_sep: ' ',
-                                                 strip_stress: true, language_switch: :remove)
+      result = stitch_map({}, parts, phone_sep: '', word_sep: ' ',
+                                     strip_stress: true, language_switch: :remove)
       expect(result).to eq('')
     end
   end
@@ -198,7 +206,7 @@ RSpec.describe Phonemizer do
   describe '.clear_cache' do
     it 'is callable and empties the cache' do
       expect { described_class.clear_cache }.not_to raise_error
-      expect(Phonemizer::CACHE).to be_empty
+      expect(Phonemizer::IPA_CACHE).to be_empty
     end
   end
 end

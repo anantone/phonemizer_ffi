@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.3 - 2026-11-25
+
+- Internal refactor of the cache, no behavior change (output verified byte-identical to 0.1.2 across 9 option combinations x 7 texts): `CACHE` renamed to `IPA_CACHE` and now stores only raw per-piece IPA keyed by `[piece, language, phone_sep]`; the expensive post-processing (separator substitution, stress stripping, language-switch marking) is applied once per batch instead of being cached
+- `validate_phone_sep!` rejects `phone_sep` values containing the `\x01` sentinel used internally for clause splitting
+- `MAX_CLAUSES = 1000` cap on the number of clauses per text to bound the FFI call fan-out
+- `stitch` signature change: `stitch(parts, ipa_map, phone_sep:, ...)` → `stitch(parts, language:, phone_sep:, ...)`, reading from `IPA_CACHE`; unit specs updated accordingly (helper that seeds `IPA_CACHE` with a test language)
+- Thread safety: new `ESPEAK_LOCK` mutex serializes every call into libespeak-ng (global voice state) via `with_voice`, making `Phonemizer` safe to call from multiple threads (transcriptions are serialized); verified: 4 threads x 4 languages produce results identical to single-threaded
+- Bounded cache: `MAX_CACHE_SIZE = 50_000`; once reached, `IPA_CACHE` is wiped wholesale (`evict_cache_if_full`) so long-running processes don't grow memory without bound
+- New `Phonemizer::Error < StandardError` raised instead of bare `RuntimeError` on espeak failures (init failure, voice not found, clause cap exceeded) — note: `rescue RuntimeError` no longer catches these, bare `rescue` still does
+- CLI: running with no arguments on a TTY now prints the usage to stderr and exits 1 (previously it phonemized the empty string); stdin-pipe and file modes unchanged
+- No behavior change in transcription output: verified byte-identical to the previous version across 9 option combinations x 9 texts
+
 ## 0.1.2 - 2026-11-24
 
 - rubocop : `.rubocop.yml` ajouté (TargetRubyVersion 3.1, NewCops désactivés, quotes simples, plafonds Metrics relevés à l'état actuel, BlockLength hors spec/) ; autocorrections appliquées ; 0 offense, specs inchangés

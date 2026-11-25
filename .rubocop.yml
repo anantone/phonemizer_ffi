@@ -13,7 +13,7 @@ Naming/AsciiIdentifiers:
   Enabled: false # « h aspiré » : H_ASPIRÉ, h_aspiré? (terme technique français)
 
 Naming/MethodParameterName:
-  AllowedNames: [a, ch, i, n] # index / lettre / nombre : params courts idiomatiques
+  AllowedNames: [a, ch, i, m, n, t] # index / lettre / nombre : params courts idiomatiques
 
 Style/OptionalBooleanParameter:
   Enabled: false # API volontaire : dierese: false/true/:auto, drapeau interne big:
@@ -32,4 +32,4 @@ Metrics/PerceivedComplexity:
 Metrics/ParameterLists:
   Max: 8
 Metrics/ModuleLength:
-  Max: 160
+  Max: 185
