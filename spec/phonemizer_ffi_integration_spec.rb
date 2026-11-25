@@ -26,7 +26,7 @@ RSpec.describe 'Phonemizer FFI integration', skip: !ffi_backend_available? &&
     end
 
     it 'passes a single-byte phone_sep through like the CLI --sep', skip: !espeak_available? &&
-                                                                         'espeak-ng not installed on PATH' do
+                                                                          'espeak-ng not installed on PATH' do
       cli, _err, _st = Open3.capture3('espeak-ng', '-q', '--ipa', '-v', 'fr-fr',
                                       '--sep= ', '--stdin', stdin_data: "tableau\n")
       ffi = Phonemizer.espeak_raw('tableau', 'fr-fr', phone_sep: ' ')

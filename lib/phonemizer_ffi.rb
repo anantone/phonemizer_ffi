@@ -1,8 +1,8 @@
 #!/usr/bin/env ruby
 # frozen_string_literal: true
 
-require "ffi"
-require_relative "phonemizer_ffi/version"
+require 'ffi'
+require_relative 'phonemizer_ffi/version'
 
 # Drop-in replacement for the espeak-ng CLI wrapper (the `phonemizer` gem),
 # calling the espeak-ng C library directly via FFI — no process spawned per
@@ -38,7 +38,7 @@ require_relative "phonemizer_ffi/version"
 module Phonemizer
   module_function
 
-  DEFAULT_LANGUAGE = "en-us"
+  DEFAULT_LANGUAGE = 'en-us'
 
   # Kept for API compatibility with the CLI wrapper. In-process calls are
   # cheap and libespeak-ng is not thread-safe: there is nothing to pool.
@@ -58,15 +58,16 @@ module Phonemizer
   # methods behave the same whether called as Phonemizer.phonemize(...) or
   # after `include Phonemizer` — module_function copies don't carry the
   # module's instance-variable context.
-  CACHE = {}
+  CACHE = {} # rubocop:disable Style/MutableConstant -- cache process-wide, muté volontairement
 
   # ---------------------------------------------------------------- FFI
 
+  # Bindings FFI de libespeak-ng (espeak_Initialize, espeak_Synth, …).
   module LibEspeak
     extend FFI::Library
 
-    ffi_lib [ENV["PHONEMIZER_ESPEAK_LIB"], "libespeak-ng.so.1",
-             "libespeak-ng.so", "libespeak-ng.dylib"].compact
+    ffi_lib [ENV['PHONEMIZER_ESPEAK_LIB'], 'libespeak-ng.so.1',
+             'libespeak-ng.so', 'libespeak-ng.dylib'].compact
 
     AUDIO_OUTPUT_SYNCHRONOUS = 2       # no audio output, no async queue
     CHARS_UTF8               = 1       # espeakCHARS_UTF8
@@ -118,11 +119,11 @@ module Phonemizer
     # missing espeak-ng-data into a return error instead of a brutal exit().
     def init!
       return true if @initialized
+
       rate = espeak_Initialize(AUDIO_OUTPUT_SYNCHRONOUS, 0, nil,
                                INITIALIZE_DONT_EXIT)
-      if rate == EE_INTERNAL_ERROR
-        raise "espeak_Initialize failed: is espeak-ng-data installed?"
-      end
+      raise 'espeak_Initialize failed: is espeak-ng-data installed?' if rate == EE_INTERNAL_ERROR
+
       @initialized = true
     end
   end
@@ -140,15 +141,15 @@ module Phonemizer
   #   language_switch: :remove (default) or :keep
   #   workers:         accepted, ignored (kept for API compatibility; the
   #                    library is called in-process and is not thread-safe)
-  def phonemize(words, language: DEFAULT_LANGUAGE, phone_sep: "",
-                word_sep: " ", strip_stress: true, language_switch: :remove,
-                workers: nil)
+  def phonemize(words, language: DEFAULT_LANGUAGE, phone_sep: '',
+                word_sep: ' ', strip_stress: true, language_switch: :remove,
+                workers: nil) # rubocop:disable Lint/UnusedMethodArgument -- conservé pour compatibilité API avec le gem phonemizer
     if words.is_a?(Array)
       phonemize_batch(words, language:, phone_sep:, word_sep:,
-                      strip_stress:, language_switch:)
+                             strip_stress:, language_switch:)
     else
       phonemize_batch([words], language:, phone_sep:, word_sep:,
-                      strip_stress:, language_switch:).first
+                               strip_stress:, language_switch:).first
     end
   end
 
@@ -216,7 +217,7 @@ module Phonemizer
   # @param language_switch [Symbol] :remove (default) or :keep language tags
   # @return [Array<String>] one phonemization per input word, in order
   def phonemize_batch(words, language:, phone_sep:, word_sep:,
-                     strip_stress:, language_switch:)
+                      strip_stress:, language_switch:)
     # Guard for nil: only copy when some element isn't already a String
     words = words.map(&:to_s) unless words.all? { |w| w.is_a?(String) }
 
@@ -242,8 +243,8 @@ module Phonemizer
 
         todo.each_with_index do |w, i|
           CACHE[key_of[w]] = stitch(chunks[i], ipa_map,
-                                     phone_sep:, word_sep:, strip_stress:,
-                                     language_switch:)
+                                    phone_sep:, word_sep:, strip_stress:,
+                                    language_switch:)
         end
       end
     end
@@ -262,29 +263,30 @@ module Phonemizer
   def stitch(parts, ipa_map, phone_sep:, word_sep:, strip_stress:,
              language_switch:)
     parts.map do |part|
-      next part if PUNCT.match?(part)               # punctuation: verbatim
-      t = ipa_map[part] || ""
-      t = t.gsub(LANG_SWITCH, "") if language_switch == :remove
+      next part if PUNCT.match?(part) # punctuation: verbatim
+
+      t = ipa_map[part] || ''
+      t = t.gsub(LANG_SWITCH, '') if language_switch == :remove
       # Always strip stress marks; strip the liaison hyphen only in
       # contiguous mode, where espeak emits it (e.g. "les amis" -> "le-z
       # ami"). In sep mode we transcribed with the sentinel, so a "-" in the
       # user's phone_sep must survive.
       if strip_stress
-        t = t.delete("ˈˌ")
-        t = t.delete("-") if phone_sep.empty?
+        t = t.delete('ˈˌ')
+        t = t.delete('-') if phone_sep.empty?
       end
-      if phone_sep.empty?
-        # contiguous phones: a plain space is a word boundary
-        t = t.gsub(" ", word_sep)
-      else
-        # Sep mode: the \x01 sentinel separates phones, a plain space marks a
-        # word boundary. Substituted in a single pass, so phone_sep and
-        # word_sep may contain ANY characters — including spaces — without
-        # collision.
-        t = t.gsub(/[\x01 ]/) do |ch|
-          ch == LibEspeak::SEP_CHAR ? phone_sep : word_sep
-        end
-      end
+      t = if phone_sep.empty?
+            # contiguous phones: a plain space is a word boundary
+            t.gsub(' ', word_sep)
+          else
+            # Sep mode: the \x01 sentinel separates phones, a plain space marks a
+            # word boundary. Substituted in a single pass, so phone_sep and
+            # word_sep may contain ANY characters — including spaces — without
+            # collision.
+            t.gsub(/[\x01 ]/) do |ch|
+              ch == LibEspeak::SEP_CHAR ? phone_sep : word_sep
+            end
+          end
       t
     end.join
   end
@@ -314,9 +316,7 @@ module Phonemizer
       spec[:languages] = lang
       rc = LibEspeak.espeak_SetVoiceByProperties(spec)
     end
-    unless rc == LibEspeak::EE_OK
-      raise "espeak-ng: cannot select voice #{language.inspect}"
-    end
+    raise "espeak-ng: cannot select voice #{language.inspect}" unless rc == LibEspeak::EE_OK
 
     yield
   end
@@ -336,13 +336,13 @@ module Phonemizer
 
     clauses = []
     while (clause = LibEspeak.espeak_TextToPhonemes(
-             tp, LibEspeak::CHARS_UTF8, mode
-           ))
+      tp, LibEspeak::CHARS_UTF8, mode
+    ))
       clauses << clause
       break if tp.read_pointer.null?
     end
     # FFI returns ASCII-8BIT strings; the IPA payload is UTF-8.
-    clauses.join(" ").strip.force_encoding(Encoding::UTF_8)
+    clauses.join(' ').strip.force_encoding(Encoding::UTF_8)
   end
 
   # ---------------------------------------------------------------- CLI
@@ -356,29 +356,29 @@ module Phonemizer
   #     library has no worker pool, so lines from stdin are the natural
   #     high-throughput path for this backend.
   def main(argv = ARGV)
-    require "optparse"
+    require 'optparse'
 
     options = {
       language: Phonemizer::DEFAULT_LANGUAGE,
-      phone_sep: "",
-      word_sep: " ",
+      phone_sep: '',
+      word_sep: ' ',
       strip_stress: true,
       language_switch: :remove
     }
 
     parser = OptionParser.new do |o|
       o.banner = "Usage: #{File.basename($PROGRAM_NAME)} [options] [text | file]"
-      o.on("-l", "--language LANG",
+      o.on('-l', '--language LANG',
            "espeak voice (default: #{Phonemizer::DEFAULT_LANGUAGE})") { |v| options[:language] = v }
-      o.on("-p", "--phone-sep SEP",
-           "separator between phones (default: none)") { |v| options[:phone_sep] = v }
-      o.on("-w", "--word-sep SEP",
-           "separator between words in one utterance (default: space)") { |v| options[:word_sep] = v }
-      o.on("-s", "--[no-]strip-stress",
-           "strip stress marks and liaison hyphens (default: yes)") { |v| options[:strip_stress] = v }
-      o.on("-k", "--keep-language-switch",
-           "keep inline (en)/(fr) language tags (default: remove)") { options[:language_switch] = :keep }
-      o.on("-h", "--help", "show this help") do
+      o.on('-p', '--phone-sep SEP',
+           'separator between phones (default: none)') { |v| options[:phone_sep] = v }
+      o.on('-w', '--word-sep SEP',
+           'separator between words in one utterance (default: space)') { |v| options[:word_sep] = v }
+      o.on('-s', '--[no-]strip-stress',
+           'strip stress marks and liaison hyphens (default: yes)') { |v| options[:strip_stress] = v }
+      o.on('-k', '--keep-language-switch',
+           'keep inline (en)/(fr) language tags (default: remove)') { options[:language_switch] = :keep }
+      o.on('-h', '--help', 'show this help') do
         puts o
         exit
       end
@@ -391,7 +391,7 @@ module Phonemizer
       exit if lines.empty?
       Phonemizer.phonemize(lines, **options).each { |line| puts line }
     else
-      text = argv.join(" ")
+      text = argv.join(' ')
       if File.file?(text)
         lines = File.readlines(text, chomp: true).reject(&:empty?)
         Phonemizer.phonemize(lines, **options).each { |line| puts line }
