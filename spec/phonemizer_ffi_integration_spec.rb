@@ -119,6 +119,38 @@ RSpec.describe 'Phonemizer FFI integration', skip: !ffi_backend_available? &&
     end
   end
 
+  describe 'thread safety' do
+    # Mirrors the 0.1.3 verification: ESPEAK_LOCK serializes every call into
+    # libespeak-ng (global voice state), so concurrent phonemize calls must
+    # return exactly the single-threaded results.
+    it 'matches single-threaded output across 4 threads x 4 languages' do
+      words = ['manger', 'tableau', 'les amis', "aujourd'hui",
+               'Bonjour, comment ça va ?']
+      languages = %w[fr-fr en-us de es]
+
+      expected = languages.to_h { |lang| [lang, Phonemizer.phonemize(words, language: lang)] }
+
+      # Force the threaded pass to do real FFI calls instead of hitting the
+      # cache filled by the baseline above.
+      Phonemizer.clear_cache
+
+      results = Array.new(4) { {} }
+      threads = 4.times.map do |t|
+        Thread.new do
+          # Rotate the language order per thread so voice switches interleave.
+          languages.rotate(t).each do |lang|
+            results[t][lang] = Phonemizer.phonemize(words, language: lang)
+          end
+        end
+      end
+      threads.each(&:value) # re-raises any exception from a thread
+
+      results.each do |thread_result|
+        expect(thread_result).to eq(expected)
+      end
+    end
+  end
+
   describe 'phonemize_ffi executable' do
     let(:bin) { File.expand_path('../bin/phonemize_ffi', __dir__) }
 

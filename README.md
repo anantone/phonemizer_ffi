@@ -33,7 +33,7 @@ The CLI wrapper pays a fork+exec+pipe round-trip per word (~1–2 ms each); the 
 Trade-offs:
 
 - You need the espeak-ng **shared library and data**, not just the CLI binary (`apt install libespeak-ng-dev`; on macOS the Homebrew lib is keg-only — set `PHONEMIZER_ESPEAK_LIB`, see below).
-- Like the CLI gem, this gem is **not thread-safe** (libespeak-ng keeps global voice state); wrap calls in your own `Mutex` if you call from several threads. There is no worker pool to tune — one process is usually faster than the CLI's parallel spawns anyway.
+- Unlike the CLI gem, this one **is thread-safe** (libespeak-ng keeps global voice state, so all calls into it are serialized through an internal process-wide mutex — see Thread Safety below); the price is that transcriptions never run in parallel. There is no worker pool to tune — one process is usually faster than the CLI's parallel spawns anyway.
 - Do not load both gems in the same process: both define the `Phonemizer` module on purpose (drop-in replacement) and their constants would clash.
 
 
@@ -104,7 +104,8 @@ Phonemizer.phonemize(
   strip_stress:    true,       # remove stress marks and liaison hyphens
   language_switch: :remove,    # :remove or :keep, for inline (fr)/(en) tags
   workers:         nil         # accepted for drop-in compatibility, IGNORED:
-                               # the FFI backend is single-threaded in-process
+                               # espeak calls are serialized internally
+                               # (see Thread Safety)
 )
 ```
 
@@ -175,7 +176,9 @@ Phonemizer.phonemize("aujourd'hui", language: "fr-fr")
 Caching
 ----------------------------------------------------------------
 
-Results are cached per `(word, language, options)` — with the FFI backend every call is an in-process function call, and the cache makes repeated forms free. Useful when the same forms recur across a large lexicon. Call `clear_cache` to free memory or start fresh:
+Raw transcriptions are cached per `(piece, language, phone_sep)` — a *piece* being each punctuation-free chunk of a word — so with the FFI backend every call is an in-process function call and the cache makes repeated forms free. Post-processing (separator substitution, stress stripping, language-switch removal) is cheap string work and is recomputed on every call, not cached. Useful when the same forms recur across a large lexicon.
+
+The cache is bounded: once it reaches 50,000 entries (`MAX_CACHE_SIZE`) it is wiped wholesale, so a long-running process doesn't grow memory without bound. Call `clear_cache` to free memory or start fresh:
 
 ```ruby
 Phonemizer.clear_cache
@@ -193,12 +196,15 @@ How it works
 Thread Safety
 ----------------------------------------------------------------
 
-This gem is **not thread-safe**: libespeak-ng keeps global voice state and the internal cache is a plain Hash without synchronization. If you call `phonemize` from multiple threads, wrap your calls in your own `Mutex`:
+This gem **is thread-safe**: libespeak-ng keeps global voice state (the selected voice), so every call into the library — initialization, voice selection, transcription, cache writes — is serialized through a process-wide mutex (`ESPEAK_LOCK`). You can call `Phonemizer.phonemize` from multiple threads; the transcriptions are simply serialized, never run in parallel, and each thread's results are identical to a single-threaded call:
 
 ```ruby
-@mutex = Mutex.new
-@mutex.synchronize { Phonemizer.phonemize(words, language: "fr-fr") }
+words = File.readlines("lexique.txt", chomp: true)
+threads = 4.times.map { Thread.new { Phonemizer.phonemize(words, language: "fr-fr") } }
+threads.each(&:join) # no Mutex of your own needed
 ```
+
+(On MRI, cache reads outside the lock are safe thanks to the GVL; on JRuby/TruffleRuby, where plain-Hash access is not GVL-protected, wrap calls in your own `Mutex`.)
 
 
 API Reference
@@ -215,7 +221,7 @@ Phonemize text to IPA. Returns a String for String input, Array for Array input.
 - `word_sep` — separator between words in multi-word input (default: `" "`)
 - `strip_stress` — remove stress marks ˈ ˌ and liaison hyphens (default: `true`)
 - `language_switch` — `:remove` or `:keep` for inline language tags (default: `:remove`)
-- `workers` — accepted for drop-in compatibility with the `phonemizer` gem, **ignored** (in-process, single-threaded backend)
+- `workers` — accepted for drop-in compatibility with the `phonemizer` gem, **ignored** (in-process backend; espeak calls are serialized through an internal mutex — see Thread Safety)
 
 ### `Phonemizer.espeak_raw(text, language, phone_sep: nil)`
 
