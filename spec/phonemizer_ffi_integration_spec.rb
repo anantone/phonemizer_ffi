@@ -175,5 +175,48 @@ RSpec.describe 'Phonemizer FFI integration', skip: !ffi_backend_available? &&
         expect(out.lines.map(&:strip)).to eq(%w[mɑ̃ʒe tablo])
       end
     end
+
+    it 'phonemizes a file given with --file, skipping blank lines' do
+      require 'tempfile'
+      Tempfile.create(%w[words .txt]) do |f|
+        f.write("manger\n   \n tableau \n")
+        f.flush
+        out, _err, _st = Open3.capture3(RbConfig.ruby, bin, '-l', 'fr-fr', '--file', f.path)
+        expect(out.lines.map(&:strip)).to eq(%w[mɑ̃ʒe tablo])
+      end
+    end
+
+    it 'treats a directory argument as text, not as a file' do
+      # "spec" is a directory in the project root, used as cwd here.
+      out, _err, st = Open3.capture3(RbConfig.ruby, bin, '-l', 'en-us', 'spec',
+                                     chdir: File.expand_path('..', __dir__))
+      expect(st).to be_success
+      expect(out.strip).not_to be_empty
+    end
+
+    it 'prints --version' do
+      out, _err, st = Open3.capture3(RbConfig.ruby, bin, '--version')
+      expect(st).to be_success
+      expect(out.strip).to eq(Phonemizer::VERSION)
+    end
+
+    it 'reports an unknown voice on stderr with exit 1, no backtrace' do
+      _out, err, st = Open3.capture3(RbConfig.ruby, bin, '-l', 'xx-yy', 'hello')
+      expect(st.exitstatus).to eq(1)
+      expect(err).to include('cannot select voice')
+      expect(err).not_to include('.rb:')
+    end
+
+    it 'reports a missing --file on stderr with exit 1' do
+      _out, err, st = Open3.capture3(RbConfig.ruby, bin, '--file', '/nonexistent/words.txt')
+      expect(st.exitstatus).to eq(1)
+      expect(err).to include('No such file')
+    end
+
+    it 'reports an invalid option on stderr with exit 1' do
+      _out, err, st = Open3.capture3(RbConfig.ruby, bin, '--bogus')
+      expect(st.exitstatus).to eq(1)
+      expect(err).to include('invalid option')
+    end
   end
 end

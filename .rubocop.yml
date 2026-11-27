@@ -1,35 +1,25 @@
 AllCops:
   TargetRubyVersion: 3.1
-  NewCops: disable
+  NewCops: enable
+  SuggestExtensions: false
 
 Style/StringLiterals:
   EnforcedStyle: single_quotes
 
-# Choix documentés pour ce codebase (prosodie française, moteur de règles) :
-Style/FormatStringToken:
-  EnforcedStyle: template # format('%3d  %s', ...) positionnels au CLI
-
-Naming/AsciiIdentifiers:
-  Enabled: false # « h aspiré » : H_ASPIRÉ, h_aspiré? (terme technique français)
-
-Naming/MethodParameterName:
-  AllowedNames: [a, ch, i, m, n, t] # index / lettre / nombre : params courts idiomatiques
-
-Style/OptionalBooleanParameter:
-  Enabled: false # API volontaire : dierese: false/true/:auto, drapeau interne big:
-
 Metrics/BlockLength:
-  Exclude: ['spec/**/*']
-  Max: 170
-Metrics/MethodLength:
-  Max: 45
-Metrics/AbcSize:
-  Max: 50
-Metrics/CyclomaticComplexity:
-  Max: 14
-Metrics/PerceivedComplexity:
-  Max: 14
-Metrics/ParameterLists:
-  Max: 8
+  Exclude: ['spec/**/*', '*.gemspec']
+
+# The library is deliberately a single file (it can be vendored and run
+# standalone), and the CLI's option parser is one long declarative block.
 Metrics/ModuleLength:
-  Max: 185
+  Max: 220
+Metrics/MethodLength:
+  Max: 25
+Metrics/AbcSize:
+  Max: 28
+Metrics/CyclomaticComplexity:
+  Max: 8
+Metrics/PerceivedComplexity:
+  Max: 9
+Metrics/ParameterLists:
+  CountKeywordArgs: false

@@ -32,7 +32,7 @@ The CLI wrapper pays a fork+exec+pipe round-trip per word (~1–2 ms each); the 
 
 Trade-offs:
 
-- You need the espeak-ng **shared library and data**, not just the CLI binary (`apt install libespeak-ng-dev`; on macOS the Homebrew lib is keg-only — set `PHONEMIZER_ESPEAK_LIB`, see below).
+- You need the espeak-ng **shared library and data**, not just the CLI binary (`apt install libespeak-ng-dev`, or `brew install espeak-ng` on macOS — see below).
 - Unlike the CLI gem, this one **is thread-safe** (libespeak-ng keeps global voice state, so all calls into it are serialized through an internal process-wide mutex — see Thread Safety below); the price is that transcriptions never run in parallel. There is no worker pool to tune — one process is usually faster than the CLI's parallel spawns anyway.
 - Do not load both gems in the same process: both define the `Phonemizer` module on purpose (drop-in replacement) and their constants would clash.
 
@@ -47,7 +47,7 @@ Requirements
   apt install libespeak-ng-dev   # Debian/Ubuntu (lib + espeak-ng-data)
   brew install espeak-ng         # macOS
   ```
-  If the library lives outside the default search path (e.g. a keg-only Homebrew install), point `PHONEMIZER_ESPEAK_LIB` at it before loading the gem:
+  The standard Homebrew locations (`/opt/homebrew` and `/usr/local`, linked or keg-only) are searched automatically. If the library lives anywhere else, point `PHONEMIZER_ESPEAK_LIB` at it before loading the gem:
   ```ruby
   ENV["PHONEMIZER_ESPEAK_LIB"] = %x(brew --prefix espeak-ng).strip + "/lib/libespeak-ng.dylib"
   ```
@@ -127,14 +127,17 @@ Phonemizer.phonemize("le célèbre Schwarzenegger", language: "fr-fr", language_
 Command line
 ----------------------------------------------------------------
 
-The `phonemize_ffi` executable exposes the same options as `phonemize`, minus `-j/--workers`, plus a **stdin batch mode** (one utterance per line — the natural high-throughput path for this backend, since there is no worker pool). Pass text as arguments, or a file path to phonemize it line by line:
+The `phonemize_ffi` executable exposes the same options as `phonemize`, minus `-j/--workers`, plus a **stdin batch mode** (one utterance per line — the natural high-throughput path for this backend, since there is no worker pool). Pass text as arguments, or a file to phonemize it line by line (lines are stripped, blank lines skipped):
 
 ```bash
 phonemize_ffi "hello world"
 phonemize_ffi -l fr-fr "les amis"
-phonemize_ffi -l fr-fr words.txt > words.ipa
+phonemize_ffi -l fr-fr -f words.txt > words.ipa      # explicit file
+phonemize_ffi -l fr-fr words.txt > words.ipa         # a single argument naming a regular file
 cat words.txt | phonemize_ffi -l fr-fr > words.ipa   # stdin batch mode
 ```
+
+A single argument is read as a file only if it names an existing regular file; use `-f` to be explicit, or quote/combine words to force text. Errors (unknown voice, missing file, bad option) are printed on stderr with exit status 1.
 
 ```bash
 phonemize_ffi --help
@@ -144,6 +147,8 @@ phonemize_ffi --help
 #     -w, --word-sep SEP            separator between words (default: space)
 #     -s, --[no-]strip-stress       strip stress marks and liaison hyphens (default: yes)
 #     -k, --keep-language-switch    keep inline (en)/(fr) language tags (default: remove)
+#     -f, --file PATH               phonemize PATH line by line
+#     -v, --version                 show version
 #     -h, --help                    show this help
 ```
 
@@ -176,9 +181,9 @@ Phonemizer.phonemize("aujourd'hui", language: "fr-fr")
 Caching
 ----------------------------------------------------------------
 
-Raw transcriptions are cached per `(piece, language, phone_sep)` — a *piece* being each punctuation-free chunk of a word — so with the FFI backend every call is an in-process function call and the cache makes repeated forms free. Post-processing (separator substitution, stress stripping, language-switch removal) is cheap string work and is recomputed on every call, not cached. Useful when the same forms recur across a large lexicon.
+Raw transcriptions are cached per piece, language and separator mode — a *piece* being each punctuation-free chunk of a word, and the mode being just "contiguous" vs. "separated", so every non-empty `phone_sep` shares the same entries. Post-processing (separator substitution, stress stripping, language-switch removal) is cheap string work and is recomputed on every call, not cached. Useful when the same forms recur across a large lexicon.
 
-The cache is bounded: once it reaches 50,000 entries (`MAX_CACHE_SIZE`) it is wiped wholesale, so a long-running process doesn't grow memory without bound. Call `clear_cache` to free memory or start fresh:
+The cache is bounded: it never holds more than 50,000 entries (`MAX_CACHE_SIZE`). When a batch would overflow it, it is wiped wholesale first, so a long-running process doesn't grow memory without bound. Results are always assembled from a per-batch map, so batches of any size — including a whole lexicon larger than the cache — come back complete. Call `clear_cache` to free memory or start fresh:
 
 ```ruby
 Phonemizer.clear_cache
@@ -196,15 +201,13 @@ How it works
 Thread Safety
 ----------------------------------------------------------------
 
-This gem **is thread-safe**: libespeak-ng keeps global voice state (the selected voice), so every call into the library — initialization, voice selection, transcription, cache writes — is serialized through a process-wide mutex (`ESPEAK_LOCK`). You can call `Phonemizer.phonemize` from multiple threads; the transcriptions are simply serialized, never run in parallel, and each thread's results are identical to a single-threaded call:
+This gem **is thread-safe**: libespeak-ng keeps global voice state (the selected voice), so every call into the library — initialization, voice selection, transcription — and every cache access is serialized through a process-wide mutex (`ESPEAK_LOCK`). You can call `Phonemizer.phonemize` from multiple threads; the transcriptions are simply serialized, never run in parallel, and each thread's results are identical to a single-threaded call:
 
 ```ruby
 words = File.readlines("lexique.txt", chomp: true)
 threads = 4.times.map { Thread.new { Phonemizer.phonemize(words, language: "fr-fr") } }
 threads.each(&:join) # no Mutex of your own needed
 ```
-
-(On MRI, cache reads outside the lock are safe thanks to the GVL; on JRuby/TruffleRuby, where plain-Hash access is not GVL-protected, wrap calls in your own `Mutex`.)
 
 
 API Reference
@@ -223,6 +226,8 @@ Phonemize text to IPA. Returns a String for String input, Array for Array input.
 - `language_switch` — `:remove` or `:keep` for inline language tags (default: `:remove`)
 - `workers` — accepted for drop-in compatibility with the `phonemizer` gem, **ignored** (in-process backend; espeak calls are serialized through an internal mutex — see Thread Safety)
 
+Raises `ArgumentError` for an unknown `language_switch`, and `Phonemizer::Error` when espeak-ng fails (e.g. a voice that cannot be selected).
+
 ### `Phonemizer.espeak_raw(text, language, phone_sep: nil)`
 
 Low-level: transcribe one utterance via libespeak-ng directly. Returns the raw IPA output string (stress marks, liaison hyphens and language tags intact).
@@ -234,7 +239,7 @@ Low-level: transcribe one utterance via libespeak-ng directly. Returns the raw I
 
 ### `Phonemizer.clear_cache`
 
-Clear the internal phonemization cache. Returns the new empty cache Hash.
+Clear the internal phonemization cache. Returns `nil`.
 
 ### `Phonemizer.main(argv = ARGV)`
 
@@ -246,7 +251,9 @@ Development
 
 ```bash
 bundle install
-bundle exec rspec     # or: rake
+bundle exec rake      # specs + rubocop
+bundle exec rspec     # specs only
+bundle exec rake yard # docs into doc/
 ```
 
 The integration specs are skipped automatically when libespeak-ng cannot be loaded in-process; the unit specs are deterministic and need no espeak at all.

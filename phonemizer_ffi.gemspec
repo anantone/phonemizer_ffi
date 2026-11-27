@@ -26,17 +26,12 @@ Gem::Specification.new do |spec|
     'source_code_uri' => 'https://github.com/anantone/phonemizer_ffi',
     'changelog_uri' => 'https://github.com/anantone/phonemizer_ffi/blob/main/CHANGELOG.md',
     'bug_tracker_uri' => 'https://github.com/anantone/phonemizer_ffi/issues',
-    'documentation_uri' => 'https://rubydoc.info/gems/phonemizer_ffi'
+    'documentation_uri' => 'https://rubydoc.info/gems/phonemizer_ffi',
+    'rubygems_mfa_required' => 'true'
   }
 
   spec.files         = Dir['lib/**/*.rb', 'README.md', 'LICENSE', 'CHANGELOG.md', '.yardopts']
   spec.require_paths = ['lib']
 
   spec.add_dependency 'ffi', '~> 1.15'
-
-  spec.add_development_dependency 'kramdown' # YARD markdown provider
-  spec.add_development_dependency 'rake'
-  spec.add_development_dependency 'rdoc'
-  spec.add_development_dependency 'rspec', '~> 3.13'
-  spec.add_development_dependency 'yard'
 end

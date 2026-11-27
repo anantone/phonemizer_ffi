@@ -4,6 +4,10 @@ require 'rspec/core/rake_task'
 
 RSpec::Core::RakeTask.new(:spec)
 
+require 'rubocop/rake_task'
+
+RuboCop::RakeTask.new
+
 require 'rdoc/task'
 
 RDoc::Task.new do |rdoc|
@@ -18,4 +22,4 @@ require 'yard'
 YARD::Rake::YardocTask.new(:yard)
 task doc: :yard
 
-task default: :spec
+task default: %i[spec rubocop]

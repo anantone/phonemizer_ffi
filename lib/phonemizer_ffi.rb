@@ -21,9 +21,9 @@ require_relative 'phonemizer_ffi/version'
 # Requires Ruby >= 3.1 (shorthand hash syntax in method calls).
 #
 # Thread safety: libespeak-ng keeps global state (selected voice), so all
-# calls into it are serialized through a process-wide mutex. It is safe to
-# call Phonemizer from multiple threads, but transcriptions will be
-# serialized.
+# calls into it, and every access to the transcription cache, are
+# serialized through a process-wide mutex. It is safe to call Phonemizer
+# from multiple threads, but transcriptions will be serialized.
 #
 # Backend contract (verified against libespeak-ng 1.1.51):
 #   espeak_TextToPhonemes translates one *clause* per call — the text up to
@@ -40,9 +40,14 @@ require_relative 'phonemizer_ffi/version'
 #   --ipa corresponds to bit 1 of phonememode (0x02); --sep to bits 8-23. The
 #   phonemize pipeline asks espeak for the \x01 sentinel byte as inter-phone
 #   separator whenever a phone_sep is requested, so any user phone_sep
-#   (multi-character, spaces, "-") can be substituted on the output without
-#   collision risk; espeak_raw, on the other hand, passes single-byte
-#   separators through as-is, like --sep.
+#   (multi-character, spaces, "-") can be substituted on the output in a
+#   single pass without collision risk; espeak_raw, on the other hand,
+#   passes single-byte separators through as-is, like --sep.
+#
+#   Known parity gap with the phonemizer gem in sep mode: around a liaison
+#   hyphen, the CLI's --sep output can space a word boundary twice where
+#   this backend spaces it once. Contiguous mode (phone_sep: "") is
+#   byte-identical.
 module Phonemizer
   module_function
 
@@ -65,14 +70,19 @@ module Phonemizer
   # halves separately and lose the liaison consonants (oʒuʁdɥi -> oʒuʁ + yi).
   PUNCT = /([[:punct:]&&[^'’‘]]+)/
 
-  # Transcription cache keyed on [piece, language, phone_sep] -> raw IPA.
+  # Transcription cache keyed on [piece, language, phonememode] -> raw IPA.
   # This is the expensive part (the FFI call). Post-processing (stress
   # stripping, separator substitution, language-switch removal) is cheap
   # string work and is NOT cached — so the hit rate is maximized across
-  # calls that differ only in formatting options.
+  # calls that differ only in formatting options (any non-empty phone_sep
+  # shares the same raw entries, since espeak always gets the sentinel).
   #
-  # In a long-running process user-generated words would grow it without
-  # bound; it is wiped wholesale once it reaches MAX_CACHE_SIZE entries.
+  # Bounded: it never holds more than MAX_CACHE_SIZE entries. When a batch
+  # would overflow it, it is wiped wholesale first. Results are always
+  # returned from a batch-local map, never re-read from the cache, so an
+  # eviction can never blank out a batch's output.
+  #
+  # Only ever accessed with ESPEAK_LOCK held.
   IPA_CACHE = {} # rubocop:disable Style/MutableConstant
   MAX_CACHE_SIZE = 50_000
 
@@ -81,8 +91,10 @@ module Phonemizer
   MAX_CLAUSES = 1000
 
   # Serializes every call into libespeak-ng (global voice state, init) and
-  # guards concurrent writes to IPA_CACHE.
+  # every read or write of IPA_CACHE.
   ESPEAK_LOCK = Mutex.new
+
+  LANGUAGE_SWITCH_MODES = %i[remove keep].freeze
 
   # ---------------------------------------------------------------- FFI
 
@@ -90,8 +102,25 @@ module Phonemizer
   module LibEspeak
     extend FFI::Library
 
-    ffi_lib [ENV['PHONEMIZER_ESPEAK_LIB'], 'libespeak-ng.so.1',
-             'libespeak-ng.so', 'libespeak-ng.dylib'].compact
+    LIBRARY_CANDIDATES = [
+      ENV.fetch('PHONEMIZER_ESPEAK_LIB', nil),
+      'libespeak-ng.so.1', 'libespeak-ng.so',
+      'libespeak-ng.1.dylib', 'libespeak-ng.dylib',
+      # Homebrew (keg-only or linked), Apple Silicon then Intel prefixes
+      '/opt/homebrew/opt/espeak-ng/lib/libespeak-ng.dylib',
+      '/opt/homebrew/lib/libespeak-ng.dylib',
+      '/usr/local/opt/espeak-ng/lib/libespeak-ng.dylib',
+      '/usr/local/lib/libespeak-ng.dylib'
+    ].compact.freeze
+
+    begin
+      ffi_lib LIBRARY_CANDIDATES
+    rescue LoadError => e
+      raise LoadError,
+            "phonemizer_ffi: could not load libespeak-ng (#{e.message}). " \
+            'Install it (apt install libespeak-ng-dev / brew install espeak-ng) ' \
+            'or set PHONEMIZER_ESPEAK_LIB to the full path of the shared library.'
+    end
 
     AUDIO_OUTPUT_SYNCHRONOUS = 2       # no audio output, no async queue
     CHARS_UTF8               = 1       # espeakCHARS_UTF8
@@ -158,10 +187,15 @@ module Phonemizer
   #   strip_stress:    remove ˈ ˌ from the output,   default true
   #   language_switch: :remove (default) or :keep
   #   workers:         accepted, ignored (API compatibility)
+  #
+  # Raises ArgumentError for an unknown language_switch, Phonemizer::Error
+  # when espeak-ng fails (e.g. unknown voice).
   def phonemize(words, language: DEFAULT_LANGUAGE, phone_sep: '',
                 word_sep: ' ', strip_stress: true, language_switch: :remove,
                 workers: nil) # rubocop:disable Lint/UnusedMethodArgument
-    validate_phone_sep!(phone_sep)
+    validate_language_switch!(language_switch)
+    phone_sep = phone_sep.to_s
+    word_sep = word_sep.to_s
 
     if words.is_a?(Array)
       phonemize_batch(words, language:, phone_sep:, word_sep:,
@@ -172,9 +206,10 @@ module Phonemizer
     end
   end
 
-  # Clears the process-wide transcription cache.
+  # Clears the process-wide transcription cache. Returns nil.
   def clear_cache
-    IPA_CACHE.clear
+    ESPEAK_LOCK.synchronize { IPA_CACHE.clear }
+    nil
   end
 
   # CLI-wrapper compatibility: raw transcription of one utterance. Returns
@@ -183,7 +218,6 @@ module Phonemizer
   # caching it would double the memory footprint for rarely-repeated calls.
   def espeak_raw(text, language, phone_sep: nil)
     sep = phone_sep.to_s
-    validate_phone_sep!(sep)
 
     with_voice(language) do
       text = text.to_s
@@ -202,53 +236,49 @@ module Phonemizer
 
   # ---------------------------------------------------------------- pipeline
 
-  # Phonemizes a whole batch. The expensive FFI transcription is cached by
-  # [piece, language, phone_sep]; post-processing is recomputed each call
-  # (it's just string ops, nanoseconds vs. microseconds for the FFI call).
+  # Phonemizes a whole batch: split punctuation out of every unique word,
+  # transcribe every unique clean piece once (cache-backed), then stitch
+  # each word back together from a batch-local piece -> IPA map.
   def phonemize_batch(words, language:, phone_sep:, word_sep:,
                       strip_stress:, language_switch:)
     words = words.map(&:to_s)
+    chunks_by_word = words.uniq.to_h { |w| [w, split_punctuation(w)] }
+    pieces = chunks_by_word.values.flatten.uniq.grep_v(PUNCT)
+    ipa_map = transcribe_pieces(pieces, language, LibEspeak.phonememode(phone_sep))
 
-    # Phase 1: collect all unique clean pieces that need transcription
-    mode = LibEspeak.phonememode(phone_sep)
-    chunks_by_word = {}
-    pending = {} # Hash used as an ordered set of unique pieces to transcribe
-
-    words.uniq.each do |w|
-      chunks = split_punctuation(w)
-      chunks_by_word[w] = chunks
-      chunks.each do |piece|
-        next if PUNCT.match?(piece)
-        next if IPA_CACHE.key?([piece, language, phone_sep])
-
-        pending[piece] = true
-      end
-    end
-
-    # Phase 2: single voice-switch, batch-transcribe all uncached pieces
-    unless pending.empty?
-      with_voice(language) do
-        pending.each_key do |piece|
-          IPA_CACHE[[piece, language, phone_sep]] = transcribe_piece(piece, mode)
-        end
-        evict_cache_if_full
-      end
-    end
-
-    # Phase 3: stitch (cheap string ops, not cached)
     words.map do |w|
-      stitch(chunks_by_word[w], language:, phone_sep:, word_sep:,
-                                strip_stress:, language_switch:)
+      stitch(chunks_by_word[w], ipa_map, phone_sep:, word_sep:,
+                                         strip_stress:, language_switch:)
     end
   end
 
   # ---------------------------------------------------------------- internals
 
-  # Keeps the cache bounded: past MAX_CACHE_SIZE entries, drop everything.
-  # Rebuilding the entries is cheap relative to the memory an unbounded
-  # cache costs in a long-running process.
-  def evict_cache_if_full
-    IPA_CACHE.clear if IPA_CACHE.size >= MAX_CACHE_SIZE
+  # pieces -> { piece => raw IPA }. Cache hits are served from IPA_CACHE,
+  # misses go through a single voice selection and one FFI call each. The
+  # returned map is batch-local, so evicting the shared cache cannot lose
+  # anything this batch needs.
+  def transcribe_pieces(pieces, language, mode)
+    ESPEAK_LOCK.synchronize do
+      ipa_map = {}
+      pending = []
+      pieces.each do |piece|
+        key = [piece, language, mode]
+        IPA_CACHE.key?(key) ? ipa_map[piece] = IPA_CACHE[key] : pending << piece
+      end
+
+      unless pending.empty?
+        select_voice(language)
+        IPA_CACHE.clear if IPA_CACHE.size + pending.size > MAX_CACHE_SIZE
+        pending.each do |piece|
+          ipa = transcribe_piece(piece, mode)
+          ipa_map[piece] = ipa
+          IPA_CACHE[[piece, language, mode]] = ipa if IPA_CACHE.size < MAX_CACHE_SIZE
+        end
+      end
+
+      ipa_map
+    end
   end
 
   # utterance -> [word, punct, word, punct, ...]
@@ -256,42 +286,43 @@ module Phonemizer
     word.split(PUNCT).reject(&:empty?)
   end
 
-  # Reassemble one utterance from its pre-split chunks.
-  def stitch(parts, language:, phone_sep:, word_sep:, strip_stress:,
+  # Reassemble one utterance from its pre-split chunks, using ipa_map
+  # (piece -> raw IPA) for the non-punctuation chunks.
+  def stitch(parts, ipa_map, phone_sep:, word_sep:, strip_stress:,
              language_switch:)
-    parts.filter_map do |part|
+    parts.map do |part|
       next part if PUNCT.match?(part)
 
-      raw = IPA_CACHE[[part, language, phone_sep]] || ''
+      raw = ipa_map.fetch(part) { raise Error, "internal: no transcription for #{part.inspect}" }
       post_process(raw, phone_sep:, word_sep:, strip_stress:, language_switch:)
     end.join
   end
 
   # Applies all formatting transformations to a raw IPA string.
-  def post_process(t, phone_sep:, word_sep:, strip_stress:, language_switch:)
-    t = t.gsub(LANG_SWITCH, '') if language_switch == :remove
+  def post_process(ipa, phone_sep:, word_sep:, strip_stress:, language_switch:)
+    ipa = ipa.gsub(LANG_SWITCH, '') if language_switch == :remove
 
     if strip_stress
-      t = t.delete('ˈˌ')
+      ipa = ipa.delete('ˈˌ')
       # Liaison hyphens only appear in contiguous mode (no phone_sep).
       # In sep mode the user's phone_sep might legitimately be "-",
       # so we must not delete hyphens there.
-      t = t.delete('-') if phone_sep.empty?
+      ipa = ipa.delete('-') if phone_sep.empty?
     end
 
-    substitute_separators(t, phone_sep:, word_sep:)
+    substitute_separators(ipa, phone_sep:, word_sep:)
   end
 
   # Replaces the sentinel (\x01) and word-boundary spaces with user separators.
   # Single-pass gsub so phone_sep and word_sep can contain any characters
   # (including spaces or the other separator) without collision.
-  def substitute_separators(t, phone_sep:, word_sep:)
+  def substitute_separators(ipa, phone_sep:, word_sep:)
     if phone_sep.empty?
       # Contiguous mode: a plain space is a word boundary
-      t.gsub(' ', word_sep)
+      ipa.gsub(' ', word_sep)
     else
       # Sep mode: \x01 = phone boundary, space = word boundary
-      t.gsub(/[\x01 ]/) do |ch|
+      ipa.gsub(/[\x01 ]/) do |ch|
         ch == LibEspeak::SEP_CHAR ? phone_sep : word_sep
       end
     end
@@ -303,20 +334,26 @@ module Phonemizer
   # The languages field must be a NUL-terminated char*: Ruby's :string
   # coercion only applies to function arguments, not struct fields.
   #
-  # Serialized: espeak keeps the selected voice in global state, so two
-  # threads picking different voices would corrupt each other's output.
+  # Must be called with ESPEAK_LOCK held: espeak keeps the selected voice in
+  # global state, so two threads picking different voices would corrupt
+  # each other's output.
+  def select_voice(language)
+    language = language.to_s
+    LibEspeak.init!
+    rc = LibEspeak.espeak_SetVoiceByName(language)
+    if rc != LibEspeak::EE_OK
+      lang = FFI::MemoryPointer.from_string(language)
+      spec = LibEspeak::Voice.new
+      spec[:languages] = lang
+      rc = LibEspeak.espeak_SetVoiceByProperties(spec)
+    end
+    raise Error, "espeak-ng: cannot select voice #{language.inspect}" unless rc == LibEspeak::EE_OK
+  end
+
+  # Takes ESPEAK_LOCK, selects the voice, and yields.
   def with_voice(language)
     ESPEAK_LOCK.synchronize do
-      LibEspeak.init!
-      rc = LibEspeak.espeak_SetVoiceByName(language)
-      if rc != LibEspeak::EE_OK
-        lang = FFI::MemoryPointer.from_string(language)
-        spec = LibEspeak::Voice.new
-        spec[:languages] = lang
-        rc = LibEspeak.espeak_SetVoiceByProperties(spec)
-      end
-      raise Error, "espeak-ng: cannot select voice #{language.inspect}" unless rc == LibEspeak::EE_OK
-
+      select_voice(language)
       yield
     end
   end
@@ -346,22 +383,21 @@ module Phonemizer
 
   # ---------------------------------------------------------------- validation
 
-  # The sentinel \x01 is used internally to mark phone boundaries before
-  # substitution. If the user passes it as phone_sep, substitution would be
-  # ambiguous.
-  def validate_phone_sep!(phone_sep)
-    return unless phone_sep == LibEspeak::SEP_CHAR
+  def validate_language_switch!(language_switch)
+    return if LANGUAGE_SWITCH_MODES.include?(language_switch)
 
     raise ArgumentError,
-          'phone_sep cannot be the sentinel character (\\x01); ' \
-          'choose a different separator'
+          "language_switch must be :remove or :keep, got #{language_switch.inspect}"
   end
 
   # ---------------------------------------------------------------- CLI
 
+  # Command-line entry point used by the phonemize_ffi executable.
+  # Input, in order of precedence: --file PATH; a single argument naming an
+  # existing regular file; text arguments (joined as one utterance); stdin
+  # (one utterance per line) when it is not a TTY. Errors are reported on
+  # stderr with exit status 1, without a backtrace.
   def main(argv = ARGV)
-    require 'optparse'
-
     options = {
       language: DEFAULT_LANGUAGE,
       phone_sep: '',
@@ -369,8 +405,37 @@ module Phonemizer
       strip_stress: true,
       language_switch: :remove
     }
+    file = nil
+    parser = cli_parser(options) { |path| file = path }
+    parser.parse!(argv)
 
-    parser = OptionParser.new do |o|
+    if file
+      cli_batch(File.read(file, encoding: Encoding::UTF_8), options)
+    elsif argv.empty? && !$stdin.tty?
+      cli_batch($stdin.read, options)
+    elsif argv.empty?
+      warn parser
+      exit 1
+    elsif argv.size == 1 && File.file?(argv[0])
+      cli_batch(File.read(argv[0], encoding: Encoding::UTF_8), options)
+    else
+      puts phonemize(argv.join(' '), **options)
+    end
+  rescue OptionParser::ParseError, Error, SystemCallError => e
+    warn "#{File.basename($PROGRAM_NAME)}: #{e.message}"
+    exit 1
+  end
+
+  # Phonemizes text line by line (blank lines skipped, lines stripped).
+  def cli_batch(text, options)
+    lines = text.lines.map(&:strip).reject(&:empty?)
+    phonemize(lines, **options).each { |line| puts line } unless lines.empty?
+  end
+
+  def cli_parser(options, &on_file)
+    require 'optparse'
+
+    OptionParser.new do |o|
       o.banner = "Usage: #{File.basename($PROGRAM_NAME)} [options] [text | file]"
       o.on('-l', '--language LANG',
            "espeak voice (default: #{DEFAULT_LANGUAGE})") { |v| options[:language] = v }
@@ -382,27 +447,23 @@ module Phonemizer
            'strip stress marks and liaison hyphens (default: yes)') { |v| options[:strip_stress] = v }
       o.on('-k', '--keep-language-switch',
            'keep inline (en)/(fr) language tags (default: remove)') { options[:language_switch] = :keep }
+      o.on('-f', '--file PATH', 'phonemize PATH line by line', &on_file)
+      o.on('-v', '--version', 'show version') do
+        puts VERSION
+        exit
+      end
       o.on('-h', '--help', 'show this help') do
         puts o
         exit
       end
     end
-    parser.parse!(argv)
-
-    if argv.empty? && !$stdin.tty?
-      lines = $stdin.read.lines.map(&:strip).reject(&:empty?)
-      exit if lines.empty?
-      phonemize(lines, **options).each { |line| puts line }
-    elsif argv.empty?
-      warn parser
-      exit 1
-    elsif argv.size == 1 && File.exist?(argv[0])
-      lines = File.readlines(argv[0], chomp: true).reject(&:empty?)
-      phonemize(lines, **options).each { |line| puts line }
-    else
-      puts phonemize(argv.join(' '), **options)
-    end
   end
+
+  # Internals: callable from inside the module, not part of the public API.
+  private_class_method :phonemize_batch, :transcribe_pieces, :split_punctuation,
+                       :stitch, :post_process, :substitute_separators,
+                       :select_voice, :with_voice, :transcribe_piece,
+                       :validate_language_switch!, :cli_batch, :cli_parser
 end
 
 # Executable mode guard: only runs when this file is invoked directly.

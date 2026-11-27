@@ -54,41 +54,37 @@ RSpec.describe Phonemizer do
 
   describe '.split_punctuation' do
     it 'splits a word with no punctuation into a single chunk' do
-      expect(described_class.split_punctuation('tableau')).to eq(['tableau'])
+      expect(described_class.send(:split_punctuation, 'tableau')).to eq(['tableau'])
     end
 
     it 'keeps punctuation as its own chunks' do
-      expect(described_class.split_punctuation('bonjour,'))
+      expect(described_class.send(:split_punctuation, 'bonjour,'))
         .to eq(['bonjour', ','])
     end
 
     it 'handles leading and trailing punctuation' do
-      expect(described_class.split_punctuation('(go)'))
+      expect(described_class.send(:split_punctuation, '(go)'))
         .to eq(['(', 'go', ')'])
     end
 
     it 'never yields empty chunks' do
-      expect(described_class.split_punctuation('...')).to eq(['...'])
+      expect(described_class.send(:split_punctuation, '...')).to eq(['...'])
     end
 
     it 'keeps a multi-word chunk whole so cross-word liaison can happen' do
       # A space is not punctuation: "les amis" stays one chunk, so espeak-ng
       # sees both words together and emits the liaison ("le-z amˈi").
-      expect(described_class.split_punctuation('les amis')).to eq(['les amis'])
+      expect(described_class.send(:split_punctuation, 'les amis')).to eq(['les amis'])
     end
   end
 
   describe '.stitch' do
-    # ipa_map: chunk piece -> raw IPA. We seed IPA_CACHE with it (key [piece, language, phone_sep]),
-    # then call stitch with the new signature — no espeak involved.
+    # stitch takes a batch-local piece -> raw IPA map — no espeak involved.
     let(:map) { { 'bonjour' => 'bɔ̃ʒuʁ', 'comment' => 'kɔmɑ̃' } }
 
-    def stitch_map(m, parts, phone_sep:, **opts)
-      m.each { |piece, ipa| Phonemizer::IPA_CACHE[[piece, 'test', phone_sep]] = ipa }
-      described_class.stitch(parts, language: 'test', phone_sep: phone_sep, **opts)
+    def stitch_map(ipa_map, parts, **opts)
+      described_class.send(:stitch, parts, ipa_map, **opts)
     end
-
-    before { Phonemizer::IPA_CACHE.clear }
 
     it 'reassembles words and punctuation in order' do
       parts = ['bonjour', ',', 'comment']
@@ -172,11 +168,11 @@ RSpec.describe Phonemizer do
       expect(result).to eq('le-z a-m-i')
     end
 
-    it 'substitutes empty string for a missing IPA mapping' do
-      parts = ['unknown']
-      result = stitch_map({}, parts, phone_sep: '', word_sep: ' ',
-                                     strip_stress: true, language_switch: :remove)
-      expect(result).to eq('')
+    it 'raises instead of silently emitting an empty string for a missing mapping' do
+      expect do
+        stitch_map({}, ['unknown'], phone_sep: '', word_sep: ' ',
+                                    strip_stress: true, language_switch: :remove)
+      end.to raise_error(Phonemizer::Error, /no transcription/)
     end
   end
 
@@ -200,6 +196,66 @@ RSpec.describe Phonemizer do
     it 'accepts and ignores the workers option (drop-in compatibility)' do
       expect { described_class.phonemize('manger', workers: 8) }
         .not_to raise_error
+    end
+
+    it 'rejects an unknown language_switch' do
+      expect { described_class.phonemize('manger', language_switch: :bogus) }
+        .to raise_error(ArgumentError, /language_switch/)
+    end
+  end
+
+  describe 'public API surface' do
+    it 'exposes only the documented entry points' do
+      %i[phonemize espeak_raw clear_cache main].each do |m|
+        expect(described_class).to respond_to(m)
+      end
+      %i[phonemize_batch stitch transcribe_piece transcribe_pieces with_voice select_voice].each do |m|
+        expect(described_class).not_to respond_to(m)
+      end
+    end
+  end
+
+  describe 'cache' do
+    # Fake the FFI layer so the cache logic is exercised without espeak.
+    let(:calls) { [] }
+
+    before do
+      allow(described_class).to receive(:select_voice)
+      allow(described_class).to receive(:transcribe_piece) do |piece, _mode|
+        calls << piece
+        "ipa_#{piece}"
+      end
+    end
+
+    it 'serves repeated pieces from the cache' do
+      described_class.phonemize(%w[a b], language: 'xx')
+      described_class.phonemize(%w[b a], language: 'xx')
+      expect(calls).to eq(%w[a b])
+    end
+
+    it 'shares raw entries across different non-empty phone_sep values' do
+      described_class.phonemize('a', language: 'xx', phone_sep: ' ')
+      described_class.phonemize('a', language: 'xx', phone_sep: '|')
+      expect(calls).to eq(%w[a])
+    end
+
+    it 'never blanks a batch when the cache is evicted mid-run' do
+      stub_const('Phonemizer::MAX_CACHE_SIZE', 3)
+      expect(described_class.phonemize(%w[a b], language: 'xx')).to eq(%w[ipa_a ipa_b])
+      expect(described_class.phonemize(%w[c d], language: 'xx')).to eq(%w[ipa_c ipa_d])
+    end
+
+    it 'returns every word of a batch larger than the cache itself' do
+      stub_const('Phonemizer::MAX_CACHE_SIZE', 3)
+      words = %w[a b c d e f]
+      expect(described_class.phonemize(words, language: 'xx')).to eq(words.map { |w| "ipa_#{w}" })
+    end
+
+    it 'never grows beyond MAX_CACHE_SIZE' do
+      stub_const('Phonemizer::MAX_CACHE_SIZE', 3)
+      described_class.phonemize(%w[a b], language: 'xx')
+      described_class.phonemize(%w[c d e f g], language: 'xx')
+      expect(Phonemizer::IPA_CACHE.size).to be <= 3
     end
   end
 
